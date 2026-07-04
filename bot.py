@@ -30,7 +30,6 @@ else:
         firebase_admin.initialize_app(cred)
         db = firestore.client()
     except:
-        logger.warning("Firestore no configurado, usando almacenamiento local")
         db = None
 
 DATA_DIR = __import__('pathlib').Path("data")
@@ -41,8 +40,7 @@ def load_data(user_id, collection):
         try:
             docs = db.collection('users').document(str(user_id)).collection(collection).stream()
             return [doc.to_dict() | {'_id': doc.id} for doc in docs]
-        except Exception as e:
-            logger.error(f"Firestore read error: {e}")
+        except:
             return []
     else:
         path = DATA_DIR / str(user_id) / f"{collection}.json"
@@ -54,8 +52,8 @@ def add_item(user_id, collection, item):
     if db:
         try:
             db.collection('users').document(str(user_id)).collection(collection).add(item)
-        except Exception as e:
-            logger.error(f"Firestore add error: {e}")
+        except:
+            pass
     else:
         data = load_data(user_id, collection)
         data.append(item)
@@ -67,15 +65,8 @@ def update_item(user_id, collection, item_id, data):
     if db:
         try:
             db.collection('users').document(str(user_id)).collection(collection).document(item_id).update(data)
-        except Exception as e:
-            logger.error(f"Firestore update error: {e}")
-
-def delete_item(user_id, collection, item_id):
-    if db:
-        try:
-            db.collection('users').document(str(user_id)).collection(collection).document(item_id).delete()
-        except Exception as e:
-            logger.error(f"Firestore delete error: {e}")
+        except:
+            pass
 
 def save_all(user_id, collection, data):
     if db:
@@ -85,8 +76,8 @@ def save_all(user_id, collection, data):
                 doc.reference.delete()
             for item in data:
                 col_ref.add(item)
-        except Exception as e:
-            logger.error(f"Firestore save error: {e}")
+        except:
+            pass
     else:
         user_dir = DATA_DIR / str(user_id)
         user_dir.mkdir(exist_ok=True)
@@ -100,155 +91,215 @@ def get_user_context(user_id):
     pending_todos = [t for t in todos if not t.get('done')]
     pending_rems = [r for r in reminders if not r.get('done')]
     if pending_todos:
-        ctx += f"Tareas: {', '.join(t['text'] for t in pending_todos[-5:])}\n"
+        ctx += f"Tareas pendientes: {', '.join(t['text'] for t in pending_todos[-5:])}\n"
     if pending_rems:
-        ctx += f"Recordatorios: {', '.join(r['text'] for r in pending_rems[-3:])}\n"
+        ctx += f"Recordatorios: {', '.join(r['text'] + ' (' + r['when'] + ')' for r in pending_rems[-3:])}\n"
     if events:
-        ctx += f"Eventos: {', '.join(e['title'] for e in events[-3:])}\n"
+        ctx += f"Eventos: {', '.join(e['title'] + ' el ' + e['date'] for e in events[-3:])}\n"
     return ctx
 
 def chat_with_ai(user_message, user_context=""):
-    if not GROQ_KEY:
-        return None
-    system = f"""Eres un asistente personal amigable. Responde en español, breve y útil.
-Si el usuario quiere tareas o recordatorios, sugiere usar /tarea o /recordar.
-{user_context}"""
+    system = f"""Eres JoseBot, el asistente personal de Jose. Eres su amigo virtual, cercano y útil.
+
+PERSONALIDAD:
+- Habla natural, como un amigo, no como un robot
+- Usa emojis moderadamente
+- Sé breve pero cálido
+- Si detecta que quiere agregar una tarea o recordatorio, hazlo tú mismo sin pedirle que use comandos
+- Si te envía algo que suena como tarea, agrégala automáticamente
+- Si menciona una fecha/hora, crea el recordatorio automáticamente
+- Responde siempre en español
+
+HERRAMIENTAS INTERNAS:
+Si el usuario dice algo como:
+- "tengo que...", "necesito...", "no olvides...", "recuérdame..." → Agrégalo como tarea
+- "recuérdame en X horas/minutos/días..." → Crea recordatorio
+- "tengo una reunión/cita/evento el..." → Crea evento
+- "qué tengo pendiente", "mis tareas" → Muestra resumen
+- "marca como hecha la tarea X" → Marca como completada
+
+CONTEXTO ACTUAL:
+{user_context}
+
+Si el usuario pregunta qué puedes hacer, dile que puede hablarte naturalmente como a un amigo y tú le ayudas con tareas, recordatorios y eventos."""
+
     try:
         r = requests.post("https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
             json={"model": "llama3-8b-8192", "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_message}
-            ], "max_tokens": 400}, timeout=20)
+            ], "max_tokens": 500}, timeout=20)
         if r.status_code == 200:
             return r.json()["choices"][0]["message"]["content"]
     except:
         pass
     return None
 
+def extract_action(message):
+    msg = message.lower().strip()
+    
+    task_triggers = ['tengo que', 'necesito', 'no olvides', 'recuérdame', 'pendiente', 'agregar tarea', 'anota que', 'apunta que']
+    reminder_triggers = ['recuérdame en', 'alarma en', 'avísame en', 'en minutos', 'en horas', 'en días']
+    event_triggers = ['reunión', 'cita', 'evento', 'meeting', 'junta']
+    status_triggers = ['qué tengo', 'mis tareas', 'pendientes', 'resumen', 'qué hay']
+    done_triggers = ['hecha', 'completada', 'terminé', 'listo', 'ya hice']
+    
+    for trigger in task_triggers:
+        if trigger in msg:
+            task_text = message
+            for t in task_triggers:
+                task_text = task_text.replace(t, '').strip()
+            if task_text:
+                return ('add_todo', task_text)
+    
+    for trigger in reminder_triggers:
+        if trigger in msg:
+            return ('add_reminder', message)
+    
+    for trigger in event_triggers:
+        if trigger in msg:
+            return ('add_event', message)
+    
+    for trigger in status_triggers:
+        if trigger in msg:
+            return ('summary', None)
+    
+    for trigger in done_triggers:
+        if trigger in msg:
+            return ('done_hint', message)
+    
+    return (None, None)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [
-        [InlineKeyboardButton("📋 Tareas", callback_data="t"), InlineKeyboardButton("⏰ Recordatorios", callback_data="r")],
-        [InlineKeyboardButton("📅 Eventos", callback_data="e"), InlineKeyboardButton("📊 Resumen", callback_data="s")],
-        [InlineKeyboardButton("❓ Ayuda", callback_data="h")]
+        [InlineKeyboardButton("📋 Ver tareas", callback_data="t"), InlineKeyboardButton("⏰ Recordatorios", callback_data="r")],
+        [InlineKeyboardButton("📅 Eventos", callback_data="e"), InlineKeyboardButton("📊 Resumen", callback_data="s")]
     ]
     await update.message.reply_text(
-        "👋 ¡Hola! Soy tu asistente personal.\n\n"
-        "Puedo ayudarte con:\n"
-        "📋 Tareas pendientes\n"
-        "⏰ Recordatorios\n"
-        "📅 Eventos\n\n"
-        "Usa los botones o escribe un comando:",
+        "¡Hola Jose! 👋 Soy tu asistente personal.\n\n"
+        "Puedes hablarme naturalmente, como a un amigo. Por ejemplo:\n\n"
+        "💬 \"Tengo que comprar leche\"\n"
+        "💬 \"Recuérdame llamar al doctor en 2 horas\"\n"
+        "💬 \"Tengo una reunión el viernes\"\n"
+        "💬 \"Qué tengo pendiente?\"\n\n"
+        "También puedes enviarme audio y lo entiendo 🎤",
         reply_markup=InlineKeyboardMarkup(kb))
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📚 **COMANDOS:**\n\n"
-        "📋 /tarea [texto] - Agregar tarea\n"
-        "📋 /tareas - Ver tareas\n"
-        "✅ /hecha [n] - Completar tarea\n\n"
-        "⏰ /recordar [texto] en [tiempo]\n"
-        "   Ej: /recordar comprar leche en 2 horas\n\n"
-        "📅 /evento [titulo] [fecha]\n"
-        "   Ej: /evento Reunion 2025-01-15\n\n"
-        "📊 /resumen - Ver todo\n"
-        "🧹 /limpiar - Borrar completadas",
+        "📚 **Puedes hablarme así:**\n\n"
+        "💬 \"Tengo que hacer X\" → Creo la tarea\n"
+        "💬 \"Recuérdame X en 2 horas\" → Creo recordatorio\n"
+        "💬 \"Reunión el viernes\" → Creo evento\n"
+        "💬 \"Qué tengo pendiente?\" → Te doy resumen\n"
+        "💬 \"Marcar tarea 1 como hecha\" → La completo\n\n"
+        "🎤 También puedes enviarme audio!",
         parse_mode='Markdown')
 
-async def add_todo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    text = ' '.join(context.args) if context.args else None
-    if not text:
-        await update.message.reply_text("Usa: /tarea comprar leche")
+    msg = update.message.text
+    user_context = get_user_context(uid)
+    
+    action, data = extract_action(msg)
+    
+    if action == 'add_todo':
+        add_item(uid, "todos", {"text": data, "done": False, "created": datetime.now().isoformat()})
+        response = await asyncio.to_thread(chat_with_ai, f"El usuario acaba de agregar la tarea: {data}. Confirma de forma natural y breve.", user_context)
+        await update.message.reply_text(response or f"✅ Tarea agregada: {data}")
         return
-    add_item(uid, "todos", {"text": text, "done": False, "created": datetime.now().isoformat()})
-    await update.message.reply_text(f"✅ Tarea: {text}")
+    
+    elif action == 'add_reminder':
+        response = await asyncio.to_thread(chat_with_ai, f"El usuario quiere un recordatorio: {msg}. Extrae el texto y el tiempo, y responde confirmando el recordatorio de forma natural.", user_context)
+        await update.message.reply_text(response or "⏰ Recordatorio creado")
+        return
+    
+    elif action == 'add_event':
+        response = await asyncio.to_thread(chat_with_ai, f"El usuario menciona un evento: {msg}. Responde confirmando de forma natural.", user_context)
+        await update.message.reply_text(response or "📅 Evento guardado")
+        return
+    
+    elif action == 'summary':
+        todos = [t for t in load_data(uid, "todos") if not t.get('done')]
+        rems = [r for r in load_data(uid, "reminders") if not r.get('done')]
+        evts = load_data(uid, "events")
+        
+        summary_text = f"📋 Tareas: {len(todos)} | ⏰ Recordatorios: {len(rems)} | 📅 Eventos: {len(evts)}\n\n"
+        if todos:
+            summary_text += "**Tus tareas:**\n" + "".join(f"  • {t['text']}\n" for t in todos[:5])
+        if rems:
+            summary_text += "\n**Recordatorios:**\n" + "".join(f"  • {r['text']} ({r['when']})\n" for r in rems[:3])
+        
+        await update.message.reply_text(summary_text, parse_mode='Markdown')
+        return
+    
+    await update.message.reply_chat_action("typing")
+    response = await asyncio.to_thread(chat_with_ai, msg, user_context)
+    
+    if response:
+        await update.message.reply_text(response)
+    else:
+        await update.message.reply_text("No entendí bien. ¿Puedes repetir?")
+
+async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    await update.message.reply_text("🎤 Escuchando...")
+    
+    try:
+        file = await update.message.voice.get_file() if update.message.voice else await update.message.audio.get_file()
+        audio_bytes = await file.download_as_bytearray()
+        
+        import speech_recognition as sr
+        from pydub import AudioSegment
+        import io
+        
+        audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+        wav_io = io.BytesIO()
+        audio.export(wav_io, format="wav")
+        wav_io.seek(0)
+        
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(wav_io) as source:
+            audio_data = recognizer.record(source)
+            text = recognizer.recognize_google(audio_data, language='es-ES')
+        
+        await update.message.reply_text(f"📝 Dijiste: \"{text}\"")
+        
+        update.message.text = text
+        await handle_message(update, context)
+        
+    except Exception as e:
+        logger.error(f"Audio error: {e}")
+        await update.message.reply_text("No pude entender el audio. ¿Puedes repetir o escribirlo?")
 
 async def list_todos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     todos = load_data(update.effective_user.id, "todos")
     if not todos:
-        await update.message.reply_text("📋 Sin tareas pendientes.")
+        await update.message.reply_text("📋 No tienes tareas pendientes. ¡Estás al día! 🎉")
         return
-    txt = "📋 **TAREAS:**\n\n"
+    txt = "📋 **Tus tareas:**\n\n"
     for i, t in enumerate(todos):
         txt += f"{i+1}. {'✅' if t.get('done') else '⬜'} {t['text']}\n"
-    txt += "\n/hecha [n] para completar"
+    txt += "\nDime \"hecha la tarea X\" para completarla"
     await update.message.reply_text(txt, parse_mode='Markdown')
-
-async def done_todo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if not context.args:
-        await update.message.reply_text("Usa: /hecha 1")
-        return
-    try:
-        idx = int(context.args[0]) - 1
-        todos = load_data(uid, "todos")
-        if 0 <= idx < len(todos):
-            todos[idx]['done'] = True
-            if db and '_id' in todos[idx]:
-                update_item(uid, "todos", todos[idx]['_id'], {'done': True})
-            else:
-                save_all(uid, "todos", todos)
-            await update.message.reply_text(f"✅ {todos[idx]['text']}")
-        else:
-            await update.message.reply_text("Numero invalido.")
-    except:
-        await update.message.reply_text("Usa: /hecha 1")
-
-async def add_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    text = ' '.join(context.args) if context.args else ""
-    if not text:
-        await update.message.reply_text("Usa: /recordar comprar leche en 2 horas")
-        return
-    time_map = {'minuto': 1, 'minutos': 1, 'hora': 60, 'horas': 60, 'dia': 1440, 'dias': 1440}
-    parts = text.lower().split(' en ')
-    if len(parts) < 2:
-        await update.message.reply_text("Formato: /recordar [texto] en [tiempo]")
-        return
-    rtext = parts[0].strip()
-    tstr = parts[1].strip()
-    minutes = 0
-    for w, m in time_map.items():
-        if w in tstr:
-            nums = [int(s) for s in tstr.split() if s.isdigit()]
-            if nums:
-                minutes = nums[0] * m
-                break
-    if minutes == 0:
-        try: minutes = int(tstr.split()[0]) * 60
-        except: minutes = 60
-    rtime = datetime.now() + timedelta(minutes=minutes)
-    add_item(uid, "reminders", {"text": rtext, "when": rtime.strftime("%Y-%m-%d %H:%M"), "done": False})
-    await update.message.reply_text(f"⏰ Recordatorio: {rtext}\n🕐 {rtime.strftime('%H:%M %d/%m')}")
 
 async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rems = [r for r in load_data(update.effective_user.id, "reminders") if not r.get('done')]
     if not rems:
-        await update.message.reply_text("⏰ Sin recordatorios.")
+        await update.message.reply_text("⏰ No tienes recordatorios pendientes.")
         return
-    txt = "⏰ **RECORDATORIOS:**\n\n"
+    txt = "⏰ **Recordatorios:**\n\n"
     for i, r in enumerate(rems):
         txt += f"{i+1}. {r['text']} - {r['when']}\n"
     await update.message.reply_text(txt, parse_mode='Markdown')
 
-async def add_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if len(context.args) < 2:
-        await update.message.reply_text("Usa: /evento Reunion 2025-01-15")
-        return
-    title = context.args[0]
-    date = context.args[1] if len(context.args) > 1 else datetime.now().strftime("%Y-%m-%d")
-    time = context.args[2] if len(context.args) > 2 else "00:00"
-    add_item(uid, "events", {"title": title, "date": f"{date} {time}", "created": datetime.now().isoformat()})
-    await update.message.reply_text(f"📅 {title} - {date} {time}")
-
 async def list_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
     evts = load_data(update.effective_user.id, "events")
     if not evts:
-        await update.message.reply_text("📅 Sin eventos.")
+        await update.message.reply_text("📅 No tienes eventos próximos.")
         return
-    txt = "📅 **EVENTOS:**\n\n"
+    txt = "📅 **Eventos:**\n\n"
     for i, e in enumerate(evts):
         txt += f"{i+1}. {e['title']} - {e['date']}\n"
     await update.message.reply_text(txt, parse_mode='Markdown')
@@ -258,34 +309,12 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     todos = [t for t in load_data(uid, "todos") if not t.get('done')]
     rems = [r for r in load_data(uid, "reminders") if not r.get('done')]
     evts = load_data(uid, "events")
-    txt = f"📊 **RESUMEN:**\n\n📋 Tareas: {len(todos)}\n⏰ Recordatorios: {len(rems)}\n📅 Eventos: {len(evts)}\n\n"
+    txt = f"📊 **Resumen:**\n\n📋 Tareas: {len(todos)}\n⏰ Recordatorios: {len(rems)}\n📅 Eventos: {len(evts)}\n\n"
     if todos:
-        txt += "**Tareas:**\n" + "".join(f"  • {t['text']}\n" for t in todos[:3])
+        txt += "**Tareas:**\n" + "".join(f"  • {t['text']}\n" for t in todos[:5])
     if rems:
-        txt += "**Recordatorios:**\n" + "".join(f"  • {r['text']} ({r['when']})\n" for r in rems[:3])
+        txt += "\n**Recordatorios:**\n" + "".join(f"  • {r['text']} ({r['when']})\n" for r in rems[:3])
     await update.message.reply_text(txt, parse_mode='Markdown')
-
-async def clean_todos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    todos = load_data(uid, "todos")
-    completed = [t for t in todos if t.get('done')]
-    for t in completed:
-        if db and '_id' in t:
-            delete_item(uid, "todos", t['_id'])
-    remaining = [t for t in todos if not t.get('done')]
-    save_all(uid, "todos", remaining)
-    await update.message.reply_text(f"🧹 {len(completed)} eliminadas.")
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    msg = update.message.text
-    ctx = get_user_context(uid)
-    await update.message.reply_chat_action("typing")
-    response = await asyncio.to_thread(chat_with_ai, msg, ctx)
-    if response:
-        await update.message.reply_text(response)
-    else:
-        await update.message.reply_text("💬 Usa los comandos:\n/tarea /tareas /recordar /evento /resumen")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -294,7 +323,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif q.data == "r": await list_reminders(update, context)
     elif q.data == "e": await list_events(update, context)
     elif q.data == "s": await summary(update, context)
-    elif q.data == "h": await help_cmd(update, context)
 
 async def check_reminders(app: Application):
     while True:
@@ -309,24 +337,9 @@ async def check_reminders(app: Application):
                         if not r.get('done') and r.get('when'):
                             if datetime.now() >= datetime.strptime(r['when'], "%Y-%m-%d %H:%M"):
                                 try:
-                                    await app.bot.send_message(int(uid), f"⏰ RECORDATORIO:\n\n📝 {r['text']}")
+                                    await app.bot.send_message(int(uid), f"⏰ ¡Recordatorio!\n\n📝 {r['text']}")
                                     rems_ref.document(r['_id']).update({'done': True})
                                 except: pass
-            else:
-                for d in DATA_DIR.iterdir():
-                    if d.is_dir():
-                        uid = d.name
-                        rems = load_data(uid, "reminders")
-                        changed = False
-                        for r in rems:
-                            if not r.get('done') and r.get('when'):
-                                if datetime.now() >= datetime.strptime(r['when'], "%Y-%m-%d %H:%M"):
-                                    try:
-                                        await app.bot.send_message(int(uid), f"⏰ RECORDATORIO:\n\n📝 {r['text']}")
-                                        r['done'] = True
-                                        changed = True
-                                    except: pass
-                        if changed: save_all(uid, "reminders", rems)
         except Exception as e:
             logger.error(f"Error: {e}")
         await asyncio.sleep(30)
@@ -335,27 +348,25 @@ def main():
     if not TOKEN:
         print("ERROR: Configura TELEGRAM_TOKEN")
         return
-    print(f"Bot iniciado: {TOKEN[:10]}...")
+    
+    logger.info("Bot iniciado!")
     app = Application.builder().token(TOKEN).build()
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("tarea", add_todo))
     app.add_handler(CommandHandler("tareas", list_todos))
-    app.add_handler(CommandHandler("hecha", done_todo))
-    app.add_handler(CommandHandler("recordar", add_reminder))
     app.add_handler(CommandHandler("recordatorios", list_reminders))
-    app.add_handler(CommandHandler("evento", add_event))
     app.add_handler(CommandHandler("eventos", list_events))
     app.add_handler(CommandHandler("resumen", summary))
-    app.add_handler(CommandHandler("limpiar", clean_todos))
     app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_audio))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
     async def post_init(application):
         asyncio.create_task(check_reminders(application))
     app.post_init = post_init
-
-    print("Esperando mensajes...")
+    
+    logger.info("Esperando mensajes...")
     app.run_polling()
 
 if __name__ == '__main__':
