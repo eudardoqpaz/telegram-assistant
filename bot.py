@@ -12,6 +12,7 @@ import requests
 import re
 import firebase_admin
 from firebase_admin import credentials, firestore
+from zoneinfo import ZoneInfo
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
 FIREBASE_CREDS = os.environ.get("FIREBASE_CREDS", "")
+TIMEZONE = os.environ.get("TIMEZONE", "America/New_York")
 
 db = None
 if FIREBASE_CREDS:
@@ -84,10 +86,13 @@ def save_all(user_id, collection, data):
         user_dir.mkdir(exist_ok=True)
         (user_dir / f"{collection}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
 
+def get_now():
+    return datetime.now(ZoneInfo(TIMEZONE))
+
 def parse_reminder_regex(text):
     msg = text.lower().strip()
     msg = msg.replace('ó', 'o').replace('á', 'a').replace('é', 'e').replace('í', 'i').replace('ú', 'u')
-    now = datetime.now()
+    now = get_now()
     
     # Pattern: recuerdame en X minutos/horas/dias [texto]
     match = re.search(r'recu[eé]rdame\s+en\s+(\d+)\s+(minutos?|horas?|d[ií]as?|semanas?)\s+(.+)', msg)
@@ -181,7 +186,7 @@ def parse_reminder_regex(text):
         month = months.get(month_name, now.month)
         
         try:
-            dt = datetime(now.year, month, day, hour, minute)
+            dt = now.replace(month=month, day=day, hour=hour, minute=minute, second=0, microsecond=0)
             if dt < now:
                 dt = dt.replace(year=now.year + 1)
         except:
@@ -203,7 +208,7 @@ def parse_reminder_regex(text):
             hour = 0
         
         try:
-            dt = datetime(now.year, now.month, day, hour, minute)
+            dt = now.replace(day=day, hour=hour, minute=minute, second=0, microsecond=0)
             if dt < now:
                 if now.month == 12:
                     dt = dt.replace(year=now.year + 1, month=1)
@@ -224,7 +229,7 @@ def parse_reminder_regex(text):
         month = months.get(month_name, now.month) if month_name else now.month
         
         try:
-            dt = datetime(now.year, month, day, 10, 0)
+            dt = now.replace(month=month, day=day, hour=10, minute=0, second=0, microsecond=0)
             if dt < now:
                 if month == 12:
                     dt = dt.replace(year=now.year + 1, month=1)
@@ -291,6 +296,7 @@ def chat_with_ai(user_message, user_context=""):
     if not GROQ_KEY:
         return None
     
+    now = get_now()
     system = f"""Eres JoseBot, el asistente personal de Jose. Eres su amigo virtual, cercano y útil.
 
 PERSONALIDAD:
@@ -298,6 +304,8 @@ PERSONALIDAD:
 - Usa emojis moderadamente
 - Sé breve pero cálido
 - Responde siempre en español
+
+FECHA ACTUAL: {now.strftime("%Y-%m-%d %H:%M")} ({TIMEZONE})
 
 CONTEXTO ACTUAL:
 {user_context}"""
@@ -365,7 +373,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "text": text,
             "when": when_str,
             "done": False,
-            "created": datetime.now().isoformat()
+            "created": get_now().isoformat()
         })
         
         time_display = dt.strftime("%H:%M")
@@ -379,7 +387,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif action == "task":
         text = data
-        add_item(uid, "todos", {"text": text, "done": False, "created": datetime.now().isoformat()})
+        add_item(uid, "todos", {"text": text, "done": False, "created": get_now().isoformat()})
         await update.message.reply_text(f"✅ Tarea guardada: {text}")
         return
     
@@ -491,10 +499,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif q.data == "h": await help_cmd(update, context)
 
 async def check_reminders(app: Application):
-    logger.info("Reminder checker started")
+    logger.info(f"Reminder checker started - timezone: {TIMEZONE}")
     while True:
         try:
-            now = datetime.now()
+            now = get_now()
+            logger.info(f"Checking reminders at {now.strftime('%Y-%m-%d %H:%M:%S')}")
             
             if db:
                 users = db.collection('users').stream()
@@ -506,6 +515,7 @@ async def check_reminders(app: Application):
                         if not r.get('done') and r.get('when'):
                             try:
                                 reminder_time = datetime.strptime(r['when'], "%Y-%m-%d %H:%M")
+                                reminder_time = reminder_time.replace(tzinfo=ZoneInfo(TIMEZONE))
                                 if now >= reminder_time:
                                     logger.info(f"Sending reminder to {uid}: {r['text']}")
                                     await app.bot.send_message(int(uid), f"⏰ ¡RECORDATORIO!\n\n📝 {r['text']}")
@@ -521,7 +531,9 @@ async def check_reminders(app: Application):
                         for r in rems:
                             if not r.get('done') and r.get('when'):
                                 try:
-                                    if now >= datetime.strptime(r['when'], "%Y-%m-%d %H:%M"):
+                                    reminder_time = datetime.strptime(r['when'], "%Y-%m-%d %H:%M")
+                                    reminder_time = reminder_time.replace(tzinfo=ZoneInfo(TIMEZONE))
+                                    if now >= reminder_time:
                                         logger.info(f"Sending reminder to {uid}: {r['text']}")
                                         await app.bot.send_message(int(uid), f"⏰ ¡RECORDATORIO!\n\n📝 {r['text']}")
                                         r['done'] = True
@@ -539,7 +551,7 @@ def main():
         print("ERROR: Configura TELEGRAM_TOKEN")
         return
     
-    logger.info("Bot iniciado!")
+    logger.info(f"Bot iniciado! Timezone: {TIMEZONE}")
     app = Application.builder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
