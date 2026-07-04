@@ -22,10 +22,14 @@ FIREBASE_CREDS = os.environ.get("FIREBASE_CREDS", "")
 
 db = None
 if FIREBASE_CREDS:
-    creds_dict = json.loads(FIREBASE_CREDS)
-    cred = credentials.Certificate(creds_dict)
-    firebase_admin.initialize_app(cred)
-    db = firestore.client()
+    try:
+        creds_dict = json.loads(FIREBASE_CREDS)
+        cred = credentials.Certificate(creds_dict)
+        firebase_admin.initialize_app(cred)
+        db = firestore.client()
+        logger.info("Firestore connected")
+    except Exception as e:
+        logger.error(f"Firestore error: {e}")
 
 DATA_DIR = __import__('pathlib').Path("data")
 DATA_DIR.mkdir(exist_ok=True)
@@ -47,14 +51,16 @@ def add_item(user_id, collection, item):
     if db:
         try:
             db.collection('users').document(str(user_id)).collection(collection).add(item)
-        except:
-            pass
+            logger.info(f"Added to {collection}: {item}")
+        except Exception as e:
+            logger.error(f"Firestore add error: {e}")
     else:
         data = load_data(user_id, collection)
         data.append(item)
         user_dir = DATA_DIR / str(user_id)
         user_dir.mkdir(exist_ok=True)
         (user_dir / f"{collection}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+        logger.info(f"Added to local {collection}: {item}")
 
 def update_item(user_id, collection, item_id, data):
     if db:
@@ -94,47 +100,43 @@ def analyze_message(user_message, user_context=""):
     now = datetime.now()
     current_date = now.strftime("%Y-%m-%d")
     current_time = now.strftime("%H:%M")
-    current_day = now.strftime("%A")
     
-    system = f"""Eres JoseBot, el asistente personal de Jose. Tu trabajo es entender lo que quiere y ejecutar acciones.
+    system = f"""Eres JoseBot, asistente personal de Jose.
 
-FECHA ACTUAL: {current_date} ({current_day})
+FECHA ACTUAL: {current_date}
 HORA ACTUAL: {current_time}
 
-CONTEXTO DEL USUARIO:
+CONTEXTO:
 {user_context}
 
-Analiza el mensaje del usuario y responde SOLO con un JSON en este formato:
+Analiza el mensaje y responde SOLO con JSON:
 
-Si es un RECORDATORIO:
-{{"action": "reminder", "text": "texto del recordatorio", "when": "YYYY-MM-DD HH:MM"}}
+RECORDATORIO (cuando dice "recuerdame", "no olvides", "alarma", "avisame", "en X minutos/horas"):
+{{"action": "reminder", "text": "que recordar", "when": "YYYY-MM-DD HH:MM"}}
 
-Si es una TAREA:
-{{"action": "task", "text": "texto de la tarea"}}
+TAREA (cuando dice "tengo que", "necesito", "anota", "pendiente"):
+{{"action": "task", "text": "que hacer"}}
 
-Si quiere VER TAREAS:
+VER TAREAS (cuando pregunta por tareas o pendientes):
 {{"action": "show_tasks"}}
 
-Si quiere VER RECORDATORIOS:
+VER RECORDATORIOS:
 {{"action": "show_reminders"}}
 
-Si quiere RESUMEN:
+RESUMEN:
 {{"action": "summary"}}
 
-Si es una CONVERSACIÓN normal (saludos, preguntas, charla):
-{{"action": "chat", "response": "tu respuesta natural y amigable"}}
+CONVERSACION normal:
+{{"action": "chat", "response": "tu respuesta"}}
 
-REGLAS IMPORTANTES:
-- Si dice "en X minutos/horas/dias", calcula la fecha exacta
-- Si dice "mañana", usa la fecha de mañana
-- Si dice "el lunes/martes/etc", calcula el próximo día de la semana
-- Si dice "el dia X", usa ese día del mes actual (o el siguiente si ya pasó)
-- Si dice "a las X", usa esa hora
-- Si no especifica hora para recordatorio, usa 1 hora después de ahora
-- Si no entiendes bien, responde como chat pidiendo aclaración
+REGLAS:
+- "en 5 minutos" = {(now + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")}
+- "en 1 hora" = {(now + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")}
+- "mañana" = {(now + timedelta(days=1)).strftime("%Y-%m-%d")}
+- "mañana a las 3pm" = {(now + timedelta(days=1)).strftime("%Y-%m-%d")} 15:00
+- Si NO especifica hora para recordatorio, usa 1 hora después
 - Responde SIEMPRE en español
-- Sé breve y natural en las respuestas de chat
-- Usa emojis moderadamente"""
+- Sé breve"""
 
     try:
         r = requests.post("https://api.groq.com/openai/v1/chat/completions",
@@ -142,11 +144,11 @@ REGLAS IMPORTANTES:
             json={"model": "llama3-8b-8192", "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_message}
-            ], "max_tokens": 300, "temperature": 0.1}, timeout=20)
+            ], "max_tokens": 200, "temperature": 0}, timeout=15)
         if r.status_code == 200:
             response = r.json()["choices"][0]["message"]["content"]
-            # Extract JSON from response
-            json_match = re.search(r'\{[^{}]*\}', response)
+            logger.info(f"AI response: {response}")
+            json_match = re.search(r'\{[^{}]+\}', response)
             if json_match:
                 return json.loads(json_match.group())
     except Exception as e:
@@ -161,32 +163,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text(
         "¡Hola Jose! 👋 Soy tu asistente personal.\n\n"
-        "Puedes hablarme como quieras, te entiendo. Por ejemplo:\n\n"
+        "Dime lo que necesites:\n\n"
         "💬 \"Recuérdame en 5 minutos buscar el cargador\"\n"
         "💬 \"Tengo que comprar leche\"\n"
-        "💬 \"No olvides llamar al doctor mañana\"\n"
         "💬 \"Qué tengo pendiente?\"\n\n"
         "🎤 También entiendo audio!",
         reply_markup=InlineKeyboardMarkup(kb))
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📚 **Puedes decirme lo que sea:**\n\n"
+        "📚 **Ejemplos:**\n\n"
         "**Recordatorios:**\n"
-        "• \"Recuérdame en 5 minutos...\"\n"
-        "• \"Recuérdame mañana a las 3pm...\"\n"
-        "• \"No olvides que tengo reunión el viernes\"\n\n"
+        "• \"Recuérdame en 5 minutos buscar el cargador\"\n"
+        "• \"Recuérdame mañana a las 3pm llamar al doctor\"\n"
+        "• \"No olvides pagar la luz el viernes\"\n\n"
         "**Tareas:**\n"
-        "• \"Tengo que hacer X\"\n"
-        "• \"Necesito comprar X\"\n"
-        "• \"Anota que debo pagar X\"\n\n"
+        "• \"Tengo que comprar leche\"\n"
+        "• \"Necesito hacer X\"\n\n"
         "**Consultas:**\n"
         "• \"Qué tengo pendiente?\"\n"
-        "• \"Mis tareas\"\n"
-        "• \"Cuándo es mi próximo recordatorio?\"\n\n"
-        "**Charla:**\n"
-        "• \"Hola, ¿cómo estás?\"\n"
-        "• \"¿Qué puedes hacer?\"\n\n"
+        "• \"Mis recordatorios\"\n\n"
         "🎤 ¡También puedes enviarme audio!",
         parse_mode='Markdown')
 
@@ -196,6 +192,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_context = get_user_context(uid)
     
     await update.message.reply_chat_action("typing")
+    logger.info(f"Processing message: {msg}")
     
     result = await asyncio.to_thread(analyze_message, msg, user_context)
     
@@ -204,6 +201,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     action = result.get("action")
+    logger.info(f"Action: {action}")
     
     if action == "reminder":
         text = result.get("text", "")
@@ -229,7 +227,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 await update.message.reply_text(f"⏰ Recordatorio guardado: {text}")
         else:
-            await update.message.reply_text("⏰ No entendí bien el recordatorio. ¿Puedes repetir?")
+            await update.message.reply_text("⏰ No entendí el recordatorio. Dime qué quieres que te recuerde y cuándo.")
     
     elif action == "task":
         text = result.get("text", "")
@@ -353,8 +351,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif q.data == "h": await help_cmd(update, context)
 
 async def check_reminders(app: Application):
+    logger.info("Reminder checker started")
     while True:
         try:
+            now = datetime.now()
+            logger.info(f"Checking reminders at {now}")
+            
             if db:
                 users = db.collection('users').stream()
                 for user_doc in users:
@@ -365,11 +367,12 @@ async def check_reminders(app: Application):
                         if not r.get('done') and r.get('when'):
                             try:
                                 reminder_time = datetime.strptime(r['when'], "%Y-%m-%d %H:%M")
-                                if datetime.now() >= reminder_time:
+                                if now >= reminder_time:
+                                    logger.info(f"Sending reminder to {uid}: {r['text']}")
                                     await app.bot.send_message(int(uid), f"⏰ ¡RECORDATORIO!\n\n📝 {r['text']}")
                                     rems_ref.document(r['_id']).update({'done': True})
-                            except:
-                                pass
+                            except Exception as e:
+                                logger.error(f"Reminder error: {e}")
             else:
                 for d in DATA_DIR.iterdir():
                     if d.is_dir():
@@ -379,17 +382,18 @@ async def check_reminders(app: Application):
                         for r in rems:
                             if not r.get('done') and r.get('when'):
                                 try:
-                                    if datetime.now() >= datetime.strptime(r['when'], "%Y-%m-%d %H:%M"):
+                                    if now >= datetime.strptime(r['when'], "%Y-%m-%d %H:%M"):
+                                        logger.info(f"Sending reminder to {uid}: {r['text']}")
                                         await app.bot.send_message(int(uid), f"⏰ ¡RECORDATORIO!\n\n📝 {r['text']}")
                                         r['done'] = True
                                         changed = True
-                                except:
-                                    pass
+                                except Exception as e:
+                                    logger.error(f"Reminder error: {e}")
                         if changed:
                             save_all(uid, "reminders", rems)
         except Exception as e:
             logger.error(f"Error checking reminders: {e}")
-        await asyncio.sleep(30)
+        await asyncio.sleep(15)
 
 def main():
     if not TOKEN:
