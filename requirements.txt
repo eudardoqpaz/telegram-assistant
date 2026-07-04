@@ -3,3 +3,5 @@ python-telegram-bot==21.3
 firebase-admin==6.5.0
 SpeechRecognition==3.10.4
 pydub==0.25.1
+google-auth==2.29.0
+google-api-python-client==2.127.0
