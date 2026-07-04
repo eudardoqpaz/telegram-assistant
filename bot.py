@@ -84,6 +84,197 @@ def save_all(user_id, collection, data):
         user_dir.mkdir(exist_ok=True)
         (user_dir / f"{collection}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
 
+def parse_reminder_regex(text):
+    msg = text.lower().strip()
+    msg = msg.replace('ó', 'o').replace('á', 'a').replace('é', 'e').replace('í', 'i').replace('ú', 'u')
+    now = datetime.now()
+    
+    # Pattern: recuerdame en X minutos/horas/dias [texto]
+    match = re.search(r'recu[eé]rdame\s+en\s+(\d+)\s+(minutos?|horas?|d[ií]as?|semanas?)\s+(.+)', msg)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2)
+        task_text = match.group(3).strip()
+        
+        if 'minuto' in unit:
+            dt = now + timedelta(minutes=amount)
+        elif 'hora' in unit:
+            dt = now + timedelta(hours=amount)
+        elif 'd' in unit:
+            dt = now + timedelta(days=amount)
+        elif 'semana' in unit:
+            dt = now + timedelta(weeks=amount)
+        else:
+            dt = now + timedelta(hours=1)
+        
+        return 'reminder', task_text, dt
+    
+    # Pattern: recuerdame [texto] en X minutos/horas/dias
+    match = re.search(r'recu[eé]rdame\s+(.+?)\s+en\s+(\d+)\s+(minutos?|horas?|d[ií]as?|semanas?)', msg)
+    if match:
+        task_text = match.group(1).strip()
+        amount = int(match.group(2))
+        unit = match.group(3)
+        
+        if 'minuto' in unit:
+            dt = now + timedelta(minutes=amount)
+        elif 'hora' in unit:
+            dt = now + timedelta(hours=amount)
+        elif 'd' in unit:
+            dt = now + timedelta(days=amount)
+        elif 'semana' in unit:
+            dt = now + timedelta(weeks=amount)
+        else:
+            dt = now + timedelta(hours=1)
+        
+        return 'reminder', task_text, dt
+    
+    # Pattern: recuerdame mañana a las X
+    match = re.search(r'recu[eé]rdame\s+(.+?)\s+ma[nñ]ana\s+(?:a las?|a la)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', msg)
+    if match:
+        task_text = match.group(1).strip()
+        hour = int(match.group(2))
+        minute = int(match.group(3) or 0)
+        ampm = match.group(4)
+        
+        if ampm == 'pm' and hour < 12:
+            hour += 12
+        elif ampm == 'am' and hour == 12:
+            hour = 0
+        
+        dt = now + timedelta(days=1)
+        dt = dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return 'reminder', task_text, dt
+    
+    # Pattern: recuerdame hoy a las X
+    match = re.search(r'recu[eé]rdame\s+(.+?)\s+hoy\s+(?:a las?|a la)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', msg)
+    if match:
+        task_text = match.group(1).strip()
+        hour = int(match.group(2))
+        minute = int(match.group(3) or 0)
+        ampm = match.group(4)
+        
+        if ampm == 'pm' and hour < 12:
+            hour += 12
+        elif ampm == 'am' and hour == 12:
+            hour = 0
+        
+        dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return 'reminder', task_text, dt
+    
+    # Pattern: recuerdame el dia X de mes a las Y
+    match = re.search(r'recu[eé]rdame\s+(.+?)\s+(?:el|el dia)\s+(\d{1,2})\s+de\s+(\w+)\s+(?:a las?|a la)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', msg)
+    if match:
+        task_text = match.group(1).strip()
+        day = int(match.group(2))
+        month_name = match.group(3)
+        hour = int(match.group(4))
+        minute = int(match.group(5) or 0)
+        ampm = match.group(6)
+        
+        if ampm == 'pm' and hour < 12:
+            hour += 12
+        elif ampm == 'am' and hour == 12:
+            hour = 0
+        
+        months = {'enero': 1, 'febrero': 2, 'marzo': 3, 'abril': 4, 'mayo': 5, 'junio': 6, 'julio': 7, 'agosto': 8, 'septiembre': 9, 'octubre': 10, 'noviembre': 11, 'diciembre': 12}
+        month = months.get(month_name, now.month)
+        
+        try:
+            dt = datetime(now.year, month, day, hour, minute)
+            if dt < now:
+                dt = dt.replace(year=now.year + 1)
+        except:
+            dt = now + timedelta(hours=1)
+        return 'reminder', task_text, dt
+    
+    # Pattern: recuerdame el dia X a las Y
+    match = re.search(r'recu[eé]rdame\s+(.+?)\s+(?:el|el dia)\s+(\d{1,2})\s+(?:a las?|a la)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', msg)
+    if match:
+        task_text = match.group(1).strip()
+        day = int(match.group(2))
+        hour = int(match.group(3))
+        minute = int(match.group(4) or 0)
+        ampm = match.group(5)
+        
+        if ampm == 'pm' and hour < 12:
+            hour += 12
+        elif ampm == 'am' and hour == 12:
+            hour = 0
+        
+        try:
+            dt = datetime(now.year, now.month, day, hour, minute)
+            if dt < now:
+                if now.month == 12:
+                    dt = dt.replace(year=now.year + 1, month=1)
+                else:
+                    dt = dt.replace(month=now.month + 1)
+        except:
+            dt = now + timedelta(hours=1)
+        return 'reminder', task_text, dt
+    
+    # Pattern: recuerdame el dia X
+    match = re.search(r'recu[eé]rdame\s+(.+?)\s+(?:el|el dia)\s+(\d{1,2})(?:\s+de\s+(\w+))?', msg)
+    if match:
+        task_text = match.group(1).strip()
+        day = int(match.group(2))
+        month_name = match.group(3)
+        
+        months = {'enero': 1, 'febrero': 2, 'marzo': 3, 'abril': 4, 'mayo': 5, 'junio': 6, 'julio': 7, 'agosto': 8, 'septiembre': 9, 'octubre': 10, 'noviembre': 11, 'diciembre': 12}
+        month = months.get(month_name, now.month) if month_name else now.month
+        
+        try:
+            dt = datetime(now.year, month, day, 10, 0)
+            if dt < now:
+                if month == 12:
+                    dt = dt.replace(year=now.year + 1, month=1)
+                else:
+                    dt = dt.replace(month=month + 1)
+        except:
+            dt = now + timedelta(days=1)
+        return 'reminder', task_text, dt
+    
+    # Pattern: recuerdame [texto] (default: 1 hour)
+    match = re.search(r'recu[eé]rdame\s+(.+)', msg)
+    if match:
+        task_text = match.group(1).strip()
+        return 'reminder', task_text, now + timedelta(hours=1)
+    
+    # Pattern: no olvides [texto]
+    match = re.search(r'no\s+olvides?\s+(.+)', msg)
+    if match:
+        task_text = match.group(1).strip()
+        return 'reminder', task_text, now + timedelta(hours=1)
+    
+    # Pattern: tengo que [texto]
+    match = re.search(r'tengo\s+que\s+(.+)', msg)
+    if match:
+        task_text = match.group(1).strip()
+        return 'task', task_text, None
+    
+    # Pattern: necesito [texto]
+    match = re.search(r'necesito\s+(.+)', msg)
+    if match:
+        task_text = match.group(1).strip()
+        return 'task', task_text, None
+    
+    # Pattern: anota [texto]
+    match = re.search(r'anota\s+(.+)', msg)
+    if match:
+        task_text = match.group(1).strip()
+        return 'task', task_text, None
+    
+    # Pattern: que tengo / mis tareas / pendientes
+    if re.search(r'(que tengo|mis tareas|pendientes|resumen|que hay)', msg):
+        return 'summary', None, None
+    
+    # Pattern: hecha/completada [numero]
+    match = re.search(r'(hecha|completada|terminé|listo|ya hice)\s+(?:la\s+)?(?:tarea\s+)?(\d+)', msg)
+    if match:
+        return 'done', int(match.group(2)), None
+    
+    return None, None, None
+
 def get_user_context(user_id):
     todos = load_data(user_id, "todos")
     reminders = load_data(user_id, "reminders")
@@ -96,47 +287,20 @@ def get_user_context(user_id):
         ctx += f"Recordatorios activos: {', '.join(r['text'] + ' (' + r['when'] + ')' for r in pending_rems[-3:])}\n"
     return ctx
 
-def analyze_message(user_message, user_context=""):
-    now = datetime.now()
-    current_date = now.strftime("%Y-%m-%d")
-    current_time = now.strftime("%H:%M")
+def chat_with_ai(user_message, user_context=""):
+    if not GROQ_KEY:
+        return None
     
-    system = f"""Eres JoseBot, asistente personal de Jose.
+    system = f"""Eres JoseBot, el asistente personal de Jose. Eres su amigo virtual, cercano y útil.
 
-FECHA ACTUAL: {current_date}
-HORA ACTUAL: {current_time}
+PERSONALIDAD:
+- Habla natural, como un amigo, no como un robot
+- Usa emojis moderadamente
+- Sé breve pero cálido
+- Responde siempre en español
 
-CONTEXTO:
-{user_context}
-
-Analiza el mensaje y responde SOLO con JSON:
-
-RECORDATORIO (cuando dice "recuerdame", "no olvides", "alarma", "avisame", "en X minutos/horas"):
-{{"action": "reminder", "text": "que recordar", "when": "YYYY-MM-DD HH:MM"}}
-
-TAREA (cuando dice "tengo que", "necesito", "anota", "pendiente"):
-{{"action": "task", "text": "que hacer"}}
-
-VER TAREAS (cuando pregunta por tareas o pendientes):
-{{"action": "show_tasks"}}
-
-VER RECORDATORIOS:
-{{"action": "show_reminders"}}
-
-RESUMEN:
-{{"action": "summary"}}
-
-CONVERSACION normal:
-{{"action": "chat", "response": "tu respuesta"}}
-
-REGLAS:
-- "en 5 minutos" = {(now + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")}
-- "en 1 hora" = {(now + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")}
-- "mañana" = {(now + timedelta(days=1)).strftime("%Y-%m-%d")}
-- "mañana a las 3pm" = {(now + timedelta(days=1)).strftime("%Y-%m-%d")} 15:00
-- Si NO especifica hora para recordatorio, usa 1 hora después
-- Responde SIEMPRE en español
-- Sé breve"""
+CONTEXTO ACTUAL:
+{user_context}"""
 
     try:
         r = requests.post("https://api.groq.com/openai/v1/chat/completions",
@@ -144,16 +308,11 @@ REGLAS:
             json={"model": "llama3-8b-8192", "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_message}
-            ], "max_tokens": 200, "temperature": 0}, timeout=15)
+            ], "max_tokens": 300, "temperature": 0.7}, timeout=15)
         if r.status_code == 200:
-            response = r.json()["choices"][0]["message"]["content"]
-            logger.info(f"AI response: {response}")
-            json_match = re.search(r'\{[^{}]+\}', response)
-            if json_match:
-                return json.loads(json_match.group())
+            return r.json()["choices"][0]["message"]["content"]
     except Exception as e:
         logger.error(f"AI error: {e}")
-    
     return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -194,69 +353,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_chat_action("typing")
     logger.info(f"Processing message: {msg}")
     
-    result = await asyncio.to_thread(analyze_message, msg, user_context)
-    
-    if not result:
-        await update.message.reply_text("No entendí bien. ¿Puedes repetir?")
-        return
-    
-    action = result.get("action")
-    logger.info(f"Action: {action}")
+    # First try regex patterns
+    action, data, dt = parse_reminder_regex(msg)
+    logger.info(f"Regex result: action={action}, data={data}, dt={dt}")
     
     if action == "reminder":
-        text = result.get("text", "")
-        when = result.get("when", "")
+        text = data
+        when_str = dt.strftime("%Y-%m-%d %H:%M")
         
-        if text and when:
-            add_item(uid, "reminders", {
-                "text": text,
-                "when": when,
-                "done": False,
-                "created": datetime.now().isoformat()
-            })
-            
-            try:
-                dt = datetime.strptime(when, "%Y-%m-%d %H:%M")
-                time_display = dt.strftime("%H:%M")
-                date_display = dt.strftime("%d/%m/%Y")
-                await update.message.reply_text(
-                    f"⏰ ¡Listo! Te recuerdo:\n\n"
-                    f"📝 {text}\n"
-                    f"🕐 {time_display} del {date_display}"
-                )
-            except:
-                await update.message.reply_text(f"⏰ Recordatorio guardado: {text}")
-        else:
-            await update.message.reply_text("⏰ No entendí el recordatorio. Dime qué quieres que te recuerde y cuándo.")
+        add_item(uid, "reminders", {
+            "text": text,
+            "when": when_str,
+            "done": False,
+            "created": datetime.now().isoformat()
+        })
+        
+        time_display = dt.strftime("%H:%M")
+        date_display = dt.strftime("%d/%m/%Y")
+        await update.message.reply_text(
+            f"⏰ ¡Listo! Te recuerdo:\n\n"
+            f"📝 {text}\n"
+            f"🕐 {time_display} del {date_display}"
+        )
+        return
     
     elif action == "task":
-        text = result.get("text", "")
-        if text:
-            add_item(uid, "todos", {"text": text, "done": False, "created": datetime.now().isoformat()})
-            await update.message.reply_text(f"✅ Tarea guardada: {text}")
-        else:
-            await update.message.reply_text("✅ No entendí la tarea. ¿Puedes repetir?")
-    
-    elif action == "show_tasks":
-        todos = load_data(uid, "todos")
-        if not todos:
-            await update.message.reply_text("📋 No tienes tareas pendientes. ¡Estás al día! 🎉")
-            return
-        txt = "📋 **Tus tareas:**\n\n"
-        for i, t in enumerate(todos):
-            txt += f"{i+1}. {'✅' if t.get('done') else '⬜'} {t['text']}\n"
-        txt += "\nDime \"hecha la tarea X\" para completarla"
-        await update.message.reply_text(txt, parse_mode='Markdown')
-    
-    elif action == "show_reminders":
-        rems = [r for r in load_data(uid, "reminders") if not r.get('done')]
-        if not rems:
-            await update.message.reply_text("⏰ No tienes recordatorios pendientes.")
-            return
-        txt = "⏰ **Recordatorios:**\n\n"
-        for i, r in enumerate(rems):
-            txt += f"{i+1}. {r['text']} - {r['when']}\n"
-        await update.message.reply_text(txt, parse_mode='Markdown')
+        text = data
+        add_item(uid, "todos", {"text": text, "done": False, "created": datetime.now().isoformat()})
+        await update.message.reply_text(f"✅ Tarea guardada: {text}")
+        return
     
     elif action == "summary":
         todos = [t for t in load_data(uid, "todos") if not t.get('done')]
@@ -269,11 +394,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not todos and not rems:
             txt += "¡No tienes nada pendiente! 🎉"
         await update.message.reply_text(txt, parse_mode='Markdown')
+        return
     
-    elif action == "chat":
-        response = result.get("response", "No entendí bien. ¿Puedes repetir?")
+    elif action == "done":
+        idx = data - 1
+        todos = load_data(uid, "todos")
+        if 0 <= idx < len(todos):
+            todos[idx]['done'] = True
+            if db and '_id' in todos[idx]:
+                update_item(uid, "todos", todos[idx]['_id'], {'done': True})
+            else:
+                save_all(uid, "todos", todos)
+            await update.message.reply_text(f"✅ ¡Listo! \"{todos[idx]['text']}\" completada.")
+        else:
+            await update.message.reply_text("¿Cuál tarea? Dime el número.")
+        return
+    
+    # If no regex match, try AI
+    response = await asyncio.to_thread(chat_with_ai, msg, user_context)
+    if response:
         await update.message.reply_text(response)
-    
     else:
         await update.message.reply_text("No entendí bien. ¿Puedes repetir?")
 
@@ -355,7 +495,6 @@ async def check_reminders(app: Application):
     while True:
         try:
             now = datetime.now()
-            logger.info(f"Checking reminders at {now}")
             
             if db:
                 users = db.collection('users').stream()
