@@ -33,6 +33,9 @@ else:
         logger.warning("Firestore no configurado, usando almacenamiento local")
         db = None
 
+DATA_DIR = __import__('pathlib').Path("data")
+DATA_DIR.mkdir(exist_ok=True)
+
 def load_data(user_id, collection):
     if db:
         try:
@@ -41,14 +44,11 @@ def load_data(user_id, collection):
         except Exception as e:
             logger.error(f"Firestore read error: {e}")
             return []
-    return []
-
-def save_item(user_id, collection, item_id, data):
-    if db:
-        try:
-            db.collection('users').document(str(user_id)).collection(collection).document(item_id).set(data)
-        except Exception as e:
-            logger.error(f"Firestore write error: {e}")
+    else:
+        path = DATA_DIR / str(user_id) / f"{collection}.json"
+        if path.exists():
+            return json.loads(path.read_text(encoding='utf-8'))
+        return []
 
 def add_item(user_id, collection, item):
     if db:
@@ -56,6 +56,19 @@ def add_item(user_id, collection, item):
             db.collection('users').document(str(user_id)).collection(collection).add(item)
         except Exception as e:
             logger.error(f"Firestore add error: {e}")
+    else:
+        data = load_data(user_id, collection)
+        data.append(item)
+        user_dir = DATA_DIR / str(user_id)
+        user_dir.mkdir(exist_ok=True)
+        (user_dir / f"{collection}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+
+def update_item(user_id, collection, item_id, data):
+    if db:
+        try:
+            db.collection('users').document(str(user_id)).collection(collection).document(item_id).update(data)
+        except Exception as e:
+            logger.error(f"Firestore update error: {e}")
 
 def delete_item(user_id, collection, item_id):
     if db:
@@ -63,6 +76,21 @@ def delete_item(user_id, collection, item_id):
             db.collection('users').document(str(user_id)).collection(collection).document(item_id).delete()
         except Exception as e:
             logger.error(f"Firestore delete error: {e}")
+
+def save_all(user_id, collection, data):
+    if db:
+        try:
+            col_ref = db.collection('users').document(str(user_id)).collection(collection)
+            for doc in col_ref.stream():
+                doc.reference.delete()
+            for item in data:
+                col_ref.add(item)
+        except Exception as e:
+            logger.error(f"Firestore save error: {e}")
+    else:
+        user_dir = DATA_DIR / str(user_id)
+        user_dir.mkdir(exist_ok=True)
+        (user_dir / f"{collection}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
 
 def get_user_context(user_id):
     todos = load_data(user_id, "todos")
@@ -81,7 +109,7 @@ def get_user_context(user_id):
 
 def chat_with_ai(user_message, user_context=""):
     if not GROQ_KEY:
-        return "💬 Chat IA no configurado. Usa /tarea /recordar /evento /resumen"
+        return None
     system = f"""Eres un asistente personal amigable. Responde en español, breve y útil.
 Si el usuario quiere tareas o recordatorios, sugiere usar /tarea o /recordar.
 {user_context}"""
@@ -94,9 +122,9 @@ Si el usuario quiere tareas o recordatorios, sugiere usar /tarea o /recordar.
             ], "max_tokens": 400}, timeout=20)
         if r.status_code == 200:
             return r.json()["choices"][0]["message"]["content"]
-        return "No pude procesar tu mensaje."
     except:
-        return "IA no disponible. Usa los comandos."
+        pass
+    return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [
@@ -106,11 +134,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text(
         "👋 ¡Hola! Soy tu asistente personal.\n\n"
-        "📝 Enviarme texto para chatear\n"
-        "📋 /tarea - Gestionar tareas\n"
-        "⏰ /recordar - Crear recordatorios\n"
-        "📅 /evento - Agregar eventos\n"
-        "📊 /resumen - Ver pendientes",
+        "Puedo ayudarte con:\n"
+        "📋 Tareas pendientes\n"
+        "⏰ Recordatorios\n"
+        "📅 Eventos\n\n"
+        "Usa los botones o escribe un comando:",
         reply_markup=InlineKeyboardMarkup(kb))
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -139,7 +167,7 @@ async def add_todo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def list_todos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     todos = load_data(update.effective_user.id, "todos")
     if not todos:
-        await update.message.reply_text("📋 Sin tareas.")
+        await update.message.reply_text("📋 Sin tareas pendientes.")
         return
     txt = "📋 **TAREAS:**\n\n"
     for i, t in enumerate(todos):
@@ -157,7 +185,10 @@ async def done_todo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         todos = load_data(uid, "todos")
         if 0 <= idx < len(todos):
             todos[idx]['done'] = True
-            save_item(uid, "todos", todos[idx]['_id'], todos[idx])
+            if db and '_id' in todos[idx]:
+                update_item(uid, "todos", todos[idx]['_id'], {'done': True})
+            else:
+                save_all(uid, "todos", todos)
             await update.message.reply_text(f"✅ {todos[idx]['text']}")
         else:
             await update.message.reply_text("Numero invalido.")
@@ -239,7 +270,10 @@ async def clean_todos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     todos = load_data(uid, "todos")
     completed = [t for t in todos if t.get('done')]
     for t in completed:
-        delete_item(uid, "todos", t['_id'])
+        if db and '_id' in t:
+            delete_item(uid, "todos", t['_id'])
+    remaining = [t for t in todos if not t.get('done')]
+    save_all(uid, "todos", remaining)
     await update.message.reply_text(f"🧹 {len(completed)} eliminadas.")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -247,8 +281,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.text
     ctx = get_user_context(uid)
     await update.message.reply_chat_action("typing")
-    resp = await asyncio.to_thread(chat_with_ai, msg, ctx)
-    await update.message.reply_text(resp)
+    response = await asyncio.to_thread(chat_with_ai, msg, ctx)
+    if response:
+        await update.message.reply_text(response)
+    else:
+        await update.message.reply_text("💬 Usa los comandos:\n/tarea /tareas /recordar /evento /resumen")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -272,9 +309,24 @@ async def check_reminders(app: Application):
                         if not r.get('done') and r.get('when'):
                             if datetime.now() >= datetime.strptime(r['when'], "%Y-%m-%d %H:%M"):
                                 try:
-                                    await app.bot.send_message(int(uid), f"⏰ **RECORDATORIO:**\n\n📝 {r['text']}", parse_mode='Markdown')
+                                    await app.bot.send_message(int(uid), f"⏰ RECORDATORIO:\n\n📝 {r['text']}")
                                     rems_ref.document(r['_id']).update({'done': True})
                                 except: pass
+            else:
+                for d in DATA_DIR.iterdir():
+                    if d.is_dir():
+                        uid = d.name
+                        rems = load_data(uid, "reminders")
+                        changed = False
+                        for r in rems:
+                            if not r.get('done') and r.get('when'):
+                                if datetime.now() >= datetime.strptime(r['when'], "%Y-%m-%d %H:%M"):
+                                    try:
+                                        await app.bot.send_message(int(uid), f"⏰ RECORDATORIO:\n\n📝 {r['text']}")
+                                        r['done'] = True
+                                        changed = True
+                                    except: pass
+                        if changed: save_all(uid, "reminders", rems)
         except Exception as e:
             logger.error(f"Error: {e}")
         await asyncio.sleep(30)
@@ -283,6 +335,7 @@ def main():
     if not TOKEN:
         print("ERROR: Configura TELEGRAM_TOKEN")
         return
+    print(f"Bot iniciado: {TOKEN[:10]}...")
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
@@ -302,7 +355,7 @@ def main():
         asyncio.create_task(check_reminders(application))
     app.post_init = post_init
 
-    print("🤖 Bot iniciado!")
+    print("Esperando mensajes...")
     app.run_polling()
 
 if __name__ == '__main__':
