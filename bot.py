@@ -33,9 +33,6 @@ else:
         logger.warning("Firestore no configurado, usando almacenamiento local")
         db = None
 
-DATA_DIR = __import__('pathlib').Path("data")
-DATA_DIR.mkdir(exist_ok=True)
-
 def load_data(user_id, collection):
     if db:
         try:
@@ -44,27 +41,14 @@ def load_data(user_id, collection):
         except Exception as e:
             logger.error(f"Firestore read error: {e}")
             return []
-    else:
-        path = DATA_DIR / str(user_id) / f"{collection}.json"
-        if path.exists():
-            return json.loads(path.read_text(encoding='utf-8'))
-        return []
+    return []
 
-def save_data(user_id, collection, data):
+def save_item(user_id, collection, item_id, data):
     if db:
         try:
-            user_ref = db.collection('users').document(str(user_id))
-            col_ref = user_ref.collection(collection)
-            for doc in col_ref.stream():
-                doc.reference.delete()
-            for i, item in enumerate(data):
-                col_ref.document(str(i)).set(item)
+            db.collection('users').document(str(user_id)).collection(collection).document(item_id).set(data)
         except Exception as e:
             logger.error(f"Firestore write error: {e}")
-    else:
-        user_dir = DATA_DIR / str(user_id)
-        user_dir.mkdir(exist_ok=True)
-        (user_dir / f"{collection}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
 
 def add_item(user_id, collection, item):
     if db:
@@ -72,10 +56,13 @@ def add_item(user_id, collection, item):
             db.collection('users').document(str(user_id)).collection(collection).add(item)
         except Exception as e:
             logger.error(f"Firestore add error: {e}")
-    else:
-        data = load_data(user_id, collection)
-        data.append(item)
-        save_data(user_id, collection, data)
+
+def delete_item(user_id, collection, item_id):
+    if db:
+        try:
+            db.collection('users').document(str(user_id)).collection(collection).document(item_id).delete()
+        except Exception as e:
+            logger.error(f"Firestore delete error: {e}")
 
 def get_user_context(user_id):
     todos = load_data(user_id, "todos")
@@ -170,7 +157,7 @@ async def done_todo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         todos = load_data(uid, "todos")
         if 0 <= idx < len(todos):
             todos[idx]['done'] = True
-            save_data(uid, "todos", todos)
+            save_item(uid, "todos", todos[idx]['_id'], todos[idx])
             await update.message.reply_text(f"✅ {todos[idx]['text']}")
         else:
             await update.message.reply_text("Numero invalido.")
@@ -250,9 +237,10 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def clean_todos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     todos = load_data(uid, "todos")
-    remaining = [t for t in todos if not t.get('done')]
-    save_data(uid, "todos", remaining)
-    await update.message.reply_text(f"🧹 {len(todos) - len(remaining)} eliminadas.")
+    completed = [t for t in todos if t.get('done')]
+    for t in completed:
+        delete_item(uid, "todos", t['_id'])
+    await update.message.reply_text(f"🧹 {len(completed)} eliminadas.")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -287,21 +275,6 @@ async def check_reminders(app: Application):
                                     await app.bot.send_message(int(uid), f"⏰ **RECORDATORIO:**\n\n📝 {r['text']}", parse_mode='Markdown')
                                     rems_ref.document(r['_id']).update({'done': True})
                                 except: pass
-            else:
-                for d in DATA_DIR.iterdir():
-                    if d.is_dir():
-                        uid = d.name
-                        rems = load_data(uid, "reminders")
-                        changed = False
-                        for r in rems:
-                            if not r.get('done') and r.get('when'):
-                                if datetime.now() >= datetime.strptime(r['when'], "%Y-%m-%d %H:%M"):
-                                    try:
-                                        await app.bot.send_message(int(uid), f"⏰ **RECORDATORIO:**\n\n📝 {r['text']}", parse_mode='Markdown')
-                                        r['done'] = True
-                                        changed = True
-                                    except: pass
-                        if changed: save_data(uid, "reminders", rems)
         except Exception as e:
             logger.error(f"Error: {e}")
         await asyncio.sleep(30)
