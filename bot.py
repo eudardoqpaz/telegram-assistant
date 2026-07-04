@@ -260,6 +260,10 @@ def parse_message(text):
     match = re.search(r'(?:anota|guarda|nota)[:\s]+(.+)', msg)
     if match: return 'note', {'text': match.group(1).strip()}
     
+    # ===== PROYECTO (múltiples tareas) =====
+    if re.search(r'(proyecto|instalar|revisar|arreglar|construir|reparar)', msg):
+        return 'project', {'text': text}
+    
     # ===== CONVERSACIÓN =====
     return 'chat', {'text': text}
 
@@ -346,6 +350,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• \"Tengo que comprar leche\"\n"
         "• \"Necesito hacer X\"\n"
         "• \"Pendiente de pagar luz\"\n\n"
+        "**📋 Proyectos (múltiples tareas):**\n"
+        "• \"Proyecto de electricidad: instalar 10 luces en apto 1, 4 en apto 2...\"\n"
+        "• \"Necesito pintar las 3 habitaciones y arreglar la puerta\"\n\n"
         "**📝 Notas:**\n"
         "• \"Anota: receta de mamá...\"\n"
         "• \"Guarda: contraseña del wifi...\"\n\n"
@@ -421,6 +428,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = data['text']
         add_item(uid, "todos", {"text": text, "done": False, "created": get_now().isoformat()})
         await update.message.reply_text(f"✅ Tarea guardada: {text}")
+    
+    elif action == "project":
+        # Use AI to break down complex message into multiple tasks
+        prompt = f"""El usuario describe un proyecto o varias tareas. Extrae CADA tarea individual y responde SOLO con un JSON array.
+
+Ejemplo de entrada: "Estoy en un proyecto de electricidad, necesito instalar 10 luces en el techo del apto 1, 4 en apto 2 y 3 en apto 3, también debo revisar los enchufes"
+
+Respuesta esperada:
+{{"tasks": ["Instalar 10 luces en techo apartamento 1", "Instalar 4 luces en techo apartamento 2", "Instalar 3 luces en techo apartamento 3", "Revisar enchufes"]}}
+
+Mensaje del usuario: {data['text']}
+
+Responde SOLO con el JSON:"""
+        
+        response = await asyncio.to_thread(chat_with_ai, prompt, "")
+        if response:
+            try:
+                json_match = re.search(r'\{[^{}]+\}', response)
+                if json_match:
+                    result = json.loads(json_match.group())
+                    tasks = result.get('tasks', [])
+                    if tasks:
+                        for task_text in tasks:
+                            add_item(uid, "todos", {"text": task_text, "done": False, "created": get_now().isoformat()})
+                        
+                        txt = f"📋 **¡Proyecto detectado! Guardé {len(tasks)} tareas:**\n\n"
+                        for i, t in enumerate(tasks):
+                            txt += f"  {i+1}. ⬜ {t}\n"
+                        await update.message.reply_text(txt, parse_mode='Markdown')
+                    else:
+                        add_item(uid, "todos", {"text": data['text'], "done": False, "created": get_now().isoformat()})
+                        await update.message.reply_text(f"✅ Tarea guardada: {data['text']}")
+            except:
+                add_item(uid, "todos", {"text": data['text'], "done": False, "created": get_now().isoformat()})
+                await update.message.reply_text(f"✅ Tarea guardada: {data['text']}")
+        else:
+            add_item(uid, "todos", {"text": data['text'], "done": False, "created": get_now().isoformat()})
+            await update.message.reply_text(f"✅ Tarea guardada: {data['text']}")
     
     elif action == "note":
         text = data['text']
